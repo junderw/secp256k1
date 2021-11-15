@@ -43,6 +43,22 @@ static void secp256k1_nonce_function_bip340_sha256_tagged_aux(secp256k1_sha256 *
     sha->bytes = 64;
 }
 
+/* Initializes SHA256 with fixed midstate. This midstate was computed by applying
+ * SHA256 to SHA256("TapTweak")||SHA256("TapTweak"). */
+static void secp256k1_schnorrsig_sign_with_taptweak_preimage_sha256_tagged(secp256k1_sha256 *sha) {
+    secp256k1_sha256_initialize(sha);
+    sha->s[0] = 0xd129a2f3ul;
+    sha->s[1] = 0x701c655dul;
+    sha->s[2] = 0x6583b6c3ul;
+    sha->s[3] = 0xb9419727ul;
+    sha->s[4] = 0x95f4e232ul;
+    sha->s[5] = 0x94fd54f4ul;
+    sha->s[6] = 0xa2ae8d85ul;
+    sha->s[7] = 0x47ca590bul;
+
+    sha->bytes = 64;
+}
+
 /* algo argument for nonce_function_bip340 to derive the nonce exactly as stated in BIP-340
  * by using the correct tagged hash function. */
 static const unsigned char bip340_algo[13] = "BIP0340/nonce";
@@ -195,6 +211,48 @@ static int secp256k1_schnorrsig_sign_internal(const secp256k1_context* ctx, unsi
 int secp256k1_schnorrsig_sign(const secp256k1_context* ctx, unsigned char *sig64, const unsigned char *msg32, const secp256k1_keypair *keypair, const unsigned char *aux_rand32) {
     /* We cast away const from the passed aux_rand32 argument since we know the default nonce function does not modify it. */
     return secp256k1_schnorrsig_sign_internal(ctx, sig64, msg32, 32, keypair, secp256k1_nonce_function_bip340, (unsigned char*)aux_rand32);
+}
+
+int secp256k1_schnorrsig_sign_with_taptweak_preimage(const secp256k1_context* ctx, unsigned char *sig64, const unsigned char *msg32, const secp256k1_keypair *keypair, const unsigned char *preimage, size_t preimagelen, const unsigned char *aux_rand32) {
+    int ret;
+    secp256k1_keypair keypair_copy;
+    secp256k1_xonly_pubkey xonly_pubkey;
+    int parity;
+    secp256k1_sha256 sha;
+    unsigned char xonly_pk32[32];
+    unsigned char tweak[32];
+
+    VERIFY_CHECK(ctx != NULL);
+    ARG_CHECK(keypair != NULL);
+    ARG_CHECK(preimage != NULL || preimagelen == 0);
+
+    /* get the xonly_pubkey for TapTweak hashing */
+    if (!secp256k1_keypair_xonly_pub(ctx, &xonly_pubkey, &parity, keypair)) {
+        return 0;
+    }
+    secp256k1_xonly_pubkey_serialize(ctx, (unsigned char*)&xonly_pk32, &xonly_pubkey);
+
+    /* Perform TapTweak hash with preimage passed in args */
+    secp256k1_schnorrsig_sign_with_taptweak_preimage_sha256_tagged(&sha);
+    secp256k1_sha256_write(&sha, (unsigned char*)&xonly_pk32, 32);
+    secp256k1_sha256_write(&sha, preimage, preimagelen);
+    secp256k1_sha256_finalize(&sha, tweak);
+
+    /* Copy then tweak the keypair */
+    memcpy(&keypair_copy, keypair, sizeof (keypair_copy));
+    if (!secp256k1_keypair_xonly_tweak_add(ctx, &keypair_copy, (const unsigned char*)&tweak)) {
+        /* Zero out the copied keypair */
+        memset(&keypair_copy, 0, sizeof(keypair_copy));
+        return 0;
+    }
+
+    /* Generate the signature */
+    ret = secp256k1_schnorrsig_sign(ctx, sig64, msg32, &keypair_copy, aux_rand32);
+
+    /* Zero out the copied keypair */
+    memset(&keypair_copy, 0, sizeof(keypair_copy));
+
+    return ret;
 }
 
 int secp256k1_schnorrsig_sign_custom(const secp256k1_context* ctx, unsigned char *sig64, const unsigned char *msg, size_t msglen, const secp256k1_keypair *keypair, secp256k1_schnorrsig_extraparams *extraparams) {
